@@ -7,8 +7,9 @@ from tkinter import filedialog, messagebox
 COPY_PATTERN = re.compile(r'^(.+?)\s*\((\d+)\)(\.[^.]+)$')
 
 class DuplicateCleanerFrame(ctk.CTkFrame):
-    def __init__(self, master, **kwargs):
+    def __init__(self, master, app_state=None, **kwargs):
         super().__init__(master, **kwargs)
+        self.app_state = app_state
         
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
@@ -118,6 +119,8 @@ class DuplicateCleanerFrame(ctk.CTkFrame):
                 self.clean_btn.configure(state=ctk.NORMAL)
                 total_size = sum(os.path.getsize(f) for f in self.duplicates if os.path.exists(f))
                 size_mb = total_size / (1024 * 1024)
+                if self.app_state:
+                    self.app_state.log(f"Duplicate scan found {len(self.duplicates)} files ({size_mb:.1f} MB).")
                 messagebox.showinfo("Scan Complete", 
                     f"Found {len(self.duplicates)} duplicates.\n"
                     f"Total size: {size_mb:.1f} MB")
@@ -200,5 +203,7 @@ class DuplicateCleanerFrame(ctk.CTkFrame):
                 os.remove(f)
                 count += 1
             except: pass
+        if self.app_state:
+            self.app_state.notify(f"Duplicate cleaner deleted {count} files.")
         messagebox.showinfo("Done", f"Deleted {count} files.")
         self.scan_files()

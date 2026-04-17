@@ -12,17 +12,24 @@ import pyaudio
 import wave
 
 class ScreenRecorderFrame(ctk.CTkFrame):
-    def __init__(self, master, **kwargs):
+    def __init__(self, master, app_state=None, **kwargs):
         super().__init__(master, **kwargs)
+        self.app_state = app_state
         
         self.grid_columnconfigure(0, weight=1)
 
         # Variables
-        self.default_folder = ctk.StringVar(value=os.path.expanduser("~/Documents/1.Recs"))
+        default_folder = os.path.expanduser("~/Documents/1.Recs")
+        if self.app_state:
+            default_folder = self.app_state.settings.get("recordings_folder", default_folder)
+        self.default_folder = ctk.StringVar(value=default_folder)
         self.resolution = ctk.StringVar(value="1080p")
         self.selected_screen = ctk.StringVar()
         self.selected_audio = ctk.StringVar()
+        self.countdown_var = ctk.IntVar(value=3)
         self.is_recording = False
+        self.is_paused = False
+        self.audio_level_var = ctk.DoubleVar(value=0)
         
         # Audio / Video objects
         self.sct = mss.mss()
@@ -86,14 +93,27 @@ class ScreenRecorderFrame(ctk.CTkFrame):
         ctk.CTkLabel(self.config_frame, text="Resolution:").grid(row=3, column=0, padx=10, pady=10, sticky="w")
         self.res_menu = ctk.CTkOptionMenu(self.config_frame, variable=self.resolution, values=["480p", "720p", "1080p"])
         self.res_menu.grid(row=3, column=1, padx=10, pady=10, sticky="w")
+
+        ctk.CTkLabel(self.config_frame, text="Countdown (sec):").grid(row=3, column=2, padx=10, pady=10, sticky="w")
+        self.countdown_entry = ctk.CTkEntry(self.config_frame, textvariable=self.countdown_var, width=80)
+        self.countdown_entry.grid(row=3, column=2, padx=(130, 10), pady=10, sticky="w")
         
         # Action Button
         self.record_btn = ctk.CTkButton(self, text="Start Recording", font=ctk.CTkFont(size=18, weight="bold"), height=50, command=self.toggle_recording, fg_color="#28a745", hover_color="#218838")
         self.record_btn.grid(row=2, column=0, padx=20, pady=30, sticky="ew")
 
+        self.pause_btn = ctk.CTkButton(
+            self, text="Pause", command=self.toggle_pause, fg_color="#f0ad4e", hover_color="#df9a2c", state="disabled"
+        )
+        self.pause_btn.grid(row=3, column=0, padx=20, pady=(0, 10), sticky="ew")
+
         # Status Label
         self.status_label = ctk.CTkLabel(self, text="Ready", font=ctk.CTkFont(size=14))
-        self.status_label.grid(row=3, column=0, padx=20, pady=10)
+        self.status_label.grid(row=4, column=0, padx=20, pady=10)
+
+        self.audio_meter = ctk.CTkProgressBar(self, variable=self.audio_level_var)
+        self.audio_meter.grid(row=5, column=0, padx=20, pady=(0, 10), sticky="ew")
+        self.audio_meter.set(0)
 
     def browse_folder(self):
         folder = filedialog.askdirectory()
@@ -145,9 +165,19 @@ class ScreenRecorderFrame(ctk.CTkFrame):
         self.audio_filename = os.path.join(save_dir, f"recording_{timestamp}.wav")
         self.final_filename = os.path.join(save_dir, f"recording_{timestamp}.mp4")
 
+        countdown = max(0, int(self.countdown_var.get()))
+        for remaining in range(countdown, 0, -1):
+            self.status_label.configure(text=f"Recording starts in {remaining}...")
+            self.update_idletasks()
+            time.sleep(1)
+
         self.is_recording = True
+        self.is_paused = False
         self.record_btn.configure(text="Stop Recording", fg_color="#dc3545", hover_color="#c82333")
+        self.pause_btn.configure(state="normal", text="Pause")
         self.status_label.configure(text="Recording...")
+        if self.app_state:
+            self.app_state.log(f"Recording started: {self.final_filename}")
 
         # Start threads
         self.video_thread = threading.Thread(target=self.record_video, args=(self.monitor, self.video_filename))
@@ -161,6 +191,7 @@ class ScreenRecorderFrame(ctk.CTkFrame):
     def stop_recording(self):
         self.is_recording = False
         self.record_btn.configure(text="Processing...", state="disabled", fg_color="gray")
+        self.pause_btn.configure(state="disabled")
         self.status_label.configure(text="Saving and processing media...")
         
         # We wait for threads in a separate thread to keep GUI responsive
@@ -172,6 +203,9 @@ class ScreenRecorderFrame(ctk.CTkFrame):
         delay = 1.0 / self.fps
         
         while self.is_recording:
+            if self.is_paused:
+                time.sleep(0.1)
+                continue
             start_time = time.time()
             img = np.array(self.sct.grab(monitor))
             frame = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
@@ -208,9 +242,14 @@ class ScreenRecorderFrame(ctk.CTkFrame):
                                      
             frames = []
             while self.is_recording:
+                if self.is_paused:
+                    time.sleep(0.1)
+                    continue
                 try:
                     data = stream.read(CHUNK, exception_on_overflow=False)
                     frames.append(data)
+                    level = min(1.0, np.frombuffer(data, dtype=np.int16).std() / 4000)
+                    self.after(0, lambda value=level: self.audio_level_var.set(value))
                 except:
                     pass
                     
@@ -253,4 +292,19 @@ class ScreenRecorderFrame(ctk.CTkFrame):
         
     def reset_gui(self):
         self.record_btn.configure(text="Start Recording", state="normal", fg_color="#28a745", hover_color="#218838")
+        self.pause_btn.configure(text="Pause", state="disabled")
+        self.audio_meter.set(0)
         self.status_label.configure(text=f"Recording saved to {self.default_folder.get()}")
+        if self.app_state:
+            self.app_state.notify(f"Recording saved: {self.final_filename}")
+
+    def toggle_pause(self):
+        if not self.is_recording:
+            return
+        self.is_paused = not self.is_paused
+        if self.is_paused:
+            self.pause_btn.configure(text="Resume")
+            self.status_label.configure(text="Recording paused")
+        else:
+            self.pause_btn.configure(text="Pause")
+            self.status_label.configure(text="Recording...")

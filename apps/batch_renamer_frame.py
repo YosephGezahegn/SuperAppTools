@@ -5,8 +5,9 @@ from tkinter import filedialog, messagebox
 
 
 class BatchRenamerFrame(ctk.CTkFrame):
-    def __init__(self, master, **kwargs):
+    def __init__(self, master, app_state=None, **kwargs):
         super().__init__(master, **kwargs)
+        self.app_state = app_state
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
@@ -105,6 +106,9 @@ class BatchRenamerFrame(ctk.CTkFrame):
         self.add_btn = ctk.CTkButton(self.footer, text="Add Files", command=self.add_files)
         self.add_btn.pack(side="left", padx=5, pady=5)
 
+        self.add_folder_btn = ctk.CTkButton(self.footer, text="Add Folder", command=self.add_folder)
+        self.add_folder_btn.pack(side="left", padx=5, pady=5)
+
         self.clear_btn = ctk.CTkButton(self.footer, text="Clear", fg_color="gray", command=self.clear_files)
         self.clear_btn.pack(side="left", padx=5, pady=5)
 
@@ -128,6 +132,17 @@ class BatchRenamerFrame(ctk.CTkFrame):
             if f not in self.input_files:
                 self.input_files.append(f)
                 self.file_list.insert("end", f"{os.path.basename(f)}\n")
+        self.rename_btn.configure(state=ctk.DISABLED)
+
+    def add_folder(self):
+        folder = filedialog.askdirectory()
+        if not folder:
+            return
+        for name in sorted(os.listdir(folder)):
+            path = os.path.join(folder, name)
+            if os.path.isfile(path) and path not in self.input_files:
+                self.input_files.append(path)
+                self.file_list.insert("end", f"{os.path.basename(path)}\n")
         self.rename_btn.configure(state=ctk.DISABLED)
 
     def clear_files(self):
@@ -242,5 +257,7 @@ class BatchRenamerFrame(ctk.CTkFrame):
             messagebox.showwarning("Done", f"Renamed with {errors} errors.")
         else:
             messagebox.showinfo("Done", "All files renamed successfully.")
+            if self.app_state:
+                self.app_state.notify(f"Batch rename finished: {len(preview['pairs'])} files.")
 
         self.clear_files()
