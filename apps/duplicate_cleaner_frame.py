@@ -1,209 +1,488 @@
+"""Duplicate file cleaner."""
+
+from __future__ import annotations
+
+import hashlib
 import os
 import re
+import threading
+from collections import defaultdict
+from typing import Dict, List, Tuple
+
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
-# Regex to match numbered copy patterns: "filename (1).ext", "filename (2).ext", etc.
-COPY_PATTERN = re.compile(r'^(.+?)\s*\((\d+)\)(\.[^.]+)$')
+from core.theme import (
+    COLOR_CARD_BG,
+    COLOR_CARD_BORDER,
+    COLOR_DANGER,
+    COLOR_MUTED,
+    COLOR_SUBTLE_BG,
+    COLOR_SUCCESS,
+    FONT_BODY,
+    FONT_SMALL,
+    GLYPH,
+    RADIUS,
+    RADIUS_LG,
+    RADIUS_SM,
+    SPACE,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+)
+from core.ui_helpers import (
+    Card,
+    DangerButton,
+    FolderPicker,
+    GhostButton,
+    PageHeader,
+    PrimaryButton,
+    StatusBadge,
+    human_size,
+)
+
+
+COPY_PATTERN = re.compile(r"^(.+?)\s*\((\d+)\)(\.[^.]+)$")
+
 
 class DuplicateCleanerFrame(ctk.CTkFrame):
     def __init__(self, master, app_state=None, **kwargs):
+        kwargs.setdefault("fg_color", "transparent")
         super().__init__(master, **kwargs)
         self.app_state = app_state
-        
+
+        self.target_folder = ctk.StringVar(value=self._initial_folder())
+        self.recursive = ctk.BooleanVar(value=True)
+        self.mode_var = ctk.StringVar(value="Smart copy names")
+        self.prefix_length = ctk.IntVar(value=10)
+        self.min_bytes = ctk.IntVar(value=0)
+        self.move_to_trash = ctk.BooleanVar(value=True)
+
+        self._scan_thread: threading.Thread | None = None
+        self._scan_cancel = threading.Event()
+        self._duplicates: List[Tuple[str, str]] = []  # (path, reason)
+        self._stats = {"scanned": 0, "duplicates": 0, "bytes": 0}
+
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
+        self._build_ui()
 
-        # Variables
-        self.target_folder = ctk.StringVar()
-        self.check_size = ctk.BooleanVar(value=True)
-        self.recursive = ctk.BooleanVar(value=True)
-        self.smart_detection = ctk.BooleanVar(value=True)
-        self.match_count = ctk.IntVar(value=10)
-        self.duplicates = []
+    # ------------------------------------------------------------------
+    def _initial_folder(self) -> str:
+        if self.app_state:
+            return self.app_state.settings.get("default_output_folder", "")
+        return ""
 
-        self.create_widgets()
+    def _build_ui(self):
+        PageHeader(
+            self,
+            title="Duplicate Cleaner",
+            subtitle="Detect and remove duplicate files by name, hash, or shared prefix.",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, SPACE_MD))
 
-    def create_widgets(self):
-        # Header
-        self.header = ctk.CTkLabel(self, text="File Duplicate Cleaner", font=ctk.CTkFont(size=24, weight="bold"))
-        self.header.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="n")
+        # ---- Source / options card
+        source_card = Card(self, title="Source & options", padding=SPACE_MD)
+        source_card.grid(row=1, column=0, sticky="ew", pady=(0, SPACE_MD))
+        body = source_card.body
+        body.grid_columnconfigure(0, weight=1)
 
-        # Folder Selection
-        self.folder_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.folder_frame.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
-        self.folder_frame.grid_columnconfigure(1, weight=1)
-        
-        ctk.CTkLabel(self.folder_frame, text="Target Folder:").grid(row=0, column=0, padx=5)
-        self.folder_entry = ctk.CTkEntry(self.folder_frame, textvariable=self.target_folder)
-        self.folder_entry.grid(row=0, column=1, padx=10, sticky="ew")
-        self.browse_btn = ctk.CTkButton(self.folder_frame, text="Browse", width=100, command=self.browse_folder)
-        self.browse_btn.grid(row=0, column=2, padx=5)
+        FolderPicker(
+            body,
+            "Target folder",
+            self.target_folder,
+            helper="Scan all files in this folder (and optionally its subfolders).",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, SPACE_SM))
 
-        # Options Frame
-        self.options_frame = ctk.CTkFrame(self)
-        self.options_frame.grid(row=2, column=0, padx=20, pady=10, sticky="ew")
-        self.options_frame.grid_columnconfigure((0,1,2), weight=1)
+        options = ctk.CTkFrame(body, fg_color="transparent")
+        options.grid(row=1, column=0, sticky="ew", pady=SPACE_SM)
+        options.grid_columnconfigure((0, 1), weight=1)
 
-        # Row 0: Basic Options
-        self.smart_cb = ctk.CTkCheckBox(self.options_frame, text="Smart Copy Detection", variable=self.smart_detection)
-        self.smart_cb.grid(row=0, column=0, padx=20, pady=10, sticky="w")
-        
-        self.check_size_cb = ctk.CTkCheckBox(self.options_frame, text="Verify File Size", variable=self.check_size)
-        self.check_size_cb.grid(row=0, column=1, padx=20, pady=10, sticky="w")
-        
-        self.recursive_cb = ctk.CTkCheckBox(self.options_frame, text="Scan Subfolders", variable=self.recursive)
-        self.recursive_cb.grid(row=0, column=2, padx=20, pady=10, sticky="w")
+        ctk.CTkLabel(
+            options, text="Detection mode", font=ctk.CTkFont(size=FONT_BODY, weight="bold"), anchor="w"
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        self.mode_toggle = ctk.CTkSegmentedButton(
+            options,
+            values=["Smart copy names", "Hash (exact match)", "Prefix + size"],
+            variable=self.mode_var,
+            command=self._on_mode_changed,
+        )
+        self.mode_toggle.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, SPACE_SM))
 
-        # Row 1: Advanced Prefix Setting
-        self.prefix_frame = ctk.CTkFrame(self.options_frame, fg_color="transparent")
-        self.prefix_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=10)
-        
-        ctk.CTkLabel(self.prefix_frame, text="Legacy Match (prefix chars):").pack(side="left", padx=(10, 5))
-        self.match_entry = ctk.CTkEntry(self.prefix_frame, textvariable=self.match_count, width=60)
-        self.match_entry.pack(side="left", padx=5)
-        
-        self.hint_label = ctk.CTkLabel(self.prefix_frame, text='(Set to 0 to disable prefix matching)', font=ctk.CTkFont(size=11), text_color="gray")
-        self.hint_label.pack(side="left", padx=5)
+        ctk.CTkCheckBox(options, text="Scan subfolders", variable=self.recursive).grid(
+            row=2, column=0, sticky="w", pady=SPACE_SM
+        )
+        ctk.CTkCheckBox(options, text="Move to system trash instead of deleting", variable=self.move_to_trash).grid(
+            row=2, column=1, sticky="w", pady=SPACE_SM
+        )
 
-        # Action Buttons
-        self.action_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.action_frame.grid(row=4, column=0, padx=20, pady=10, sticky="ew")
-        self.action_frame.grid_columnconfigure((0,1), weight=1)
+        self.prefix_frame = ctk.CTkFrame(options, fg_color="transparent")
+        self.prefix_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=SPACE_SM)
+        ctk.CTkLabel(self.prefix_frame, text="Prefix length").pack(side="left", padx=(0, SPACE_SM))
+        ctk.CTkEntry(self.prefix_frame, textvariable=self.prefix_length, width=80).pack(side="left")
+        ctk.CTkLabel(
+            self.prefix_frame,
+            text=f"{GLYPH['dot']} Matches files sharing the first N characters and size.",
+            text_color=COLOR_MUTED,
+            font=ctk.CTkFont(size=FONT_SMALL),
+        ).pack(side="left", padx=SPACE)
 
-        self.scan_btn = ctk.CTkButton(self.action_frame, text="Scan for Duplicates", height=40, command=self.scan_files)
-        self.scan_btn.grid(row=0, column=0, padx=5, sticky="ew")
-        
-        self.clean_btn = ctk.CTkButton(self.action_frame, text="Delete Duplicates", height=40, 
-                                      fg_color="indianred", hover_color="darkred",
-                                      command=self.confirm_delete, state=ctk.DISABLED)
-        self.clean_btn.grid(row=0, column=1, padx=5, sticky="ew")
+        size_row = ctk.CTkFrame(options, fg_color="transparent")
+        size_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=SPACE_SM)
+        ctk.CTkLabel(size_row, text="Ignore files smaller than (bytes)").pack(side="left", padx=(0, SPACE_SM))
+        ctk.CTkEntry(size_row, textvariable=self.min_bytes, width=100).pack(side="left")
 
-        # Results List
-        self.results_frame = ctk.CTkFrame(self)
-        self.results_frame.grid(row=3, column=0, padx=20, pady=10, sticky="nsew")
-        self.results_frame.grid_columnconfigure(0, weight=1)
-        self.results_frame.grid_rowconfigure(1, weight=1)
+        self._on_mode_changed(self.mode_var.get())
 
-        self.results_label = ctk.CTkLabel(self.results_frame, text="Duplicates Found:", font=ctk.CTkFont(weight="bold"))
-        self.results_label.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+        # ---- Action bar
+        actions = ctk.CTkFrame(self, fg_color="transparent")
+        actions.grid(row=2, column=0, sticky="ew", pady=(0, SPACE_MD))
+        actions.grid_columnconfigure(0, weight=1)
 
-        self.results_list = ctk.CTkTextbox(self.results_frame)
-        self.results_list.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
+        self.status_badge = StatusBadge(actions, status="Idle")
+        self.status_badge.grid(row=0, column=0, sticky="w")
 
-    def browse_folder(self):
-        folder = filedialog.askdirectory()
-        if folder:
-            self.target_folder.set(folder)
+        self.scan_btn = PrimaryButton(actions, text=f"{GLYPH['search']}  Scan now", command=self.scan_files, width=160)
+        self.scan_btn.grid(row=0, column=1, padx=(SPACE_SM, 0))
 
+        self.cancel_btn = GhostButton(actions, text="Cancel", command=self._cancel_scan, width=100, state="disabled")
+        self.cancel_btn.grid(row=0, column=2, padx=(SPACE_SM, 0))
+
+        self.delete_btn = DangerButton(
+            actions, text=f"{GLYPH['close']}  Remove duplicates", command=self.confirm_delete, width=200, state="disabled"
+        )
+        self.delete_btn.grid(row=0, column=3, padx=(SPACE_SM, 0))
+
+        self.progress = ctk.CTkProgressBar(self)
+        self.progress.grid(row=3, column=0, sticky="ew", pady=(0, SPACE_SM))
+        self.progress.set(0)
+        self.progress.grid_remove()
+
+        # ---- Results list
+        results_card = Card(self, title="Results", padding=SPACE_MD)
+        results_card.grid(row=4, column=0, sticky="nsew")
+        self.grid_rowconfigure(4, weight=1)
+        results_card.body.grid_rowconfigure(1, weight=1)
+
+        header_bar = ctk.CTkFrame(results_card.body, fg_color="transparent")
+        header_bar.grid(row=0, column=0, sticky="ew")
+        header_bar.grid_columnconfigure(0, weight=1)
+        self.summary_label = ctk.CTkLabel(
+            header_bar,
+            text="No scan yet.",
+            text_color=COLOR_MUTED,
+            font=ctk.CTkFont(size=FONT_BODY),
+            anchor="w",
+        )
+        self.summary_label.grid(row=0, column=0, sticky="w")
+
+        self.results_scroll = ctk.CTkScrollableFrame(
+            results_card.body, fg_color="transparent"
+        )
+        self.results_scroll.grid(row=1, column=0, sticky="nsew", pady=(SPACE_SM, 0))
+        self.results_scroll.grid_columnconfigure(0, weight=1)
+
+    # ------------------------------------------------------------------
+    def _on_mode_changed(self, mode: str):
+        is_prefix = mode == "Prefix + size"
+        for child in self.prefix_frame.winfo_children():
+            try:
+                child.configure(state=("normal" if is_prefix else "disabled"))
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ------------------------------------------------------------------
     def scan_files(self):
-        folder = self.target_folder.get()
-        if not folder or not os.path.exists(folder):
-            messagebox.showerror("Error", "Please select a valid folder.")
+        folder = self.target_folder.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("Select a folder", "Please choose an existing folder before scanning.")
+            return
+        if self._scan_thread and self._scan_thread.is_alive():
             return
 
-        self.results_list.delete("1.0", "end")
-        self.duplicates = []
-        unique_dups = set()
+        if self.app_state:
+            self.app_state.remember_folder(folder)
 
+        self._duplicates.clear()
+        self._stats = {"scanned": 0, "duplicates": 0, "bytes": 0}
+        for child in self.results_scroll.winfo_children():
+            child.destroy()
+
+        self.progress.grid()
+        self.progress.set(0)
+        self.scan_btn.configure(state="disabled")
+        self.delete_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="normal")
+        self.status_badge.set_status("Running")
+        self.summary_label.configure(text="Scanning…")
+
+        self._scan_cancel = threading.Event()
+        self._scan_thread = threading.Thread(target=self._scan_worker, args=(folder,), daemon=True)
+        self._scan_thread.start()
+
+    def _cancel_scan(self):
+        self._scan_cancel.set()
+
+    def _scan_worker(self, folder: str):
+        mode = self.mode_var.get()
+        min_bytes = max(0, self.min_bytes.get() or 0)
         try:
-            # 1. Run Smart Copy Detection if enabled
-            if self.smart_detection.get():
-                self.scan_numbered_copies(folder, unique_dups)
+            all_files = list(self._iter_files(folder, min_bytes))
+            total = len(all_files) or 1
+            self._update_status(f"Indexed {len(all_files):,} files. Detecting duplicates…", progress=0.05)
 
-            # 2. Run Prefix Match (Legacy) if enabled
-            if self.match_count.get() > 0:
-                self.scan_prefix_match(folder, unique_dups)
-
-            if self.duplicates:
-                self.clean_btn.configure(state=ctk.NORMAL)
-                total_size = sum(os.path.getsize(f) for f in self.duplicates if os.path.exists(f))
-                size_mb = total_size / (1024 * 1024)
-                if self.app_state:
-                    self.app_state.log(f"Duplicate scan found {len(self.duplicates)} files ({size_mb:.1f} MB).")
-                messagebox.showinfo("Scan Complete", 
-                    f"Found {len(self.duplicates)} duplicates.\n"
-                    f"Total size: {size_mb:.1f} MB")
+            if mode == "Hash (exact match)":
+                duplicates = self._detect_by_hash(all_files, total)
+            elif mode == "Prefix + size":
+                duplicates = self._detect_by_prefix(all_files, total)
             else:
-                self.clean_btn.configure(state=ctk.DISABLED)
-                messagebox.showinfo("Scan Complete", "No duplicates found.")
+                duplicates = self._detect_smart_copies(all_files, total)
 
-        except Exception as e:
-            messagebox.showerror("Error", f"An error occurred: {str(e)}")
+            self._duplicates = duplicates
+            self._stats["duplicates"] = len(duplicates)
+            self._stats["bytes"] = sum(os.path.getsize(p) for p, _ in duplicates if os.path.exists(p))
+            self._stats["scanned"] = len(all_files)
+            self.after(0, self._finish_scan)
+        except Exception as exc:  # noqa: BLE001
+            self.after(0, lambda err=exc: self._scan_failed(err))
 
-    def scan_numbered_copies(self, folder, unique_dups):
-        """Detect numbered copies: file (1).ext, etc."""
-        all_files = {}
-        for root, dirs, files in os.walk(folder):
+    # ------------------------------------------------------------------
+    def _iter_files(self, folder: str, min_bytes: int):
+        for root, _dirs, files in os.walk(folder):
             if not self.recursive.get() and root != folder:
                 continue
-            all_files[root] = set(files)
-
-        for dir_path, filenames in all_files.items():
-            for filename in sorted(filenames):
-                match = COPY_PATTERN.match(filename)
-                if match:
-                    base_name = match.group(1).strip()
-                    copy_num = match.group(2)
-                    extension = match.group(3)
-                    original_name = base_name + extension
-
-                    if original_name in filenames:
-                        dup_path = os.path.join(dir_path, filename)
-                        if dup_path not in unique_dups:
-                            unique_dups.add(dup_path)
-                            self.duplicates.append(dup_path)
-                            size_kb = os.path.getsize(dup_path) // 1024
-                            self.results_list.insert("end", 
-                                f"[SMART COPY #{copy_num}] {filename} ({size_kb} KB)\n"
-                                f"   Original: {original_name}\n"
-                                f"   Path: {dup_path}\n\n")
-
-    def scan_prefix_match(self, folder, unique_dups):
-        """Standard prefix-based duplicate detection."""
-        file_map = {}
-        match_n = self.match_count.get()
-
-        for root, dirs, files in os.walk(folder):
-            if not self.recursive.get() and root != folder:
-                continue
-            
-            for filename in files:
-                file_path = os.path.join(root, filename)
-                if file_path in unique_dups: continue # Already found by smart scan
-
+            for name in files:
+                if self._scan_cancel.is_set():
+                    return
+                full = os.path.join(root, name)
                 try:
-                    file_size = os.path.getsize(file_path)
-                    prefix = filename[:match_n].lower()
-                    key = (prefix, file_size) if self.check_size.get() else prefix
-                    
-                    if key not in file_map:
-                        file_map[key] = []
-                    file_map[key].append(file_path)
-                except: continue
+                    size = os.path.getsize(full)
+                except OSError:
+                    continue
+                if size < min_bytes:
+                    continue
+                yield full, size
 
-        for key, paths in file_map.items():
+    def _detect_smart_copies(self, files, total):
+        paths_by_dir: Dict[str, set] = defaultdict(set)
+        for path, _size in files:
+            paths_by_dir[os.path.dirname(path)].add(os.path.basename(path))
+
+        duplicates: List[Tuple[str, str]] = []
+        for index, (path, _size) in enumerate(files):
+            if self._scan_cancel.is_set():
+                break
+            name = os.path.basename(path)
+            match = COPY_PATTERN.match(name)
+            if not match:
+                continue
+            original = match.group(1).strip() + match.group(3)
+            if original in paths_by_dir[os.path.dirname(path)]:
+                reason = f"Copy of “{original}”"
+                duplicates.append((path, reason))
+            self._update_status(None, progress=0.05 + 0.9 * (index / total))
+        return duplicates
+
+    def _detect_by_hash(self, files, total):
+        # Bucket by size first so we only hash likely candidates.
+        by_size: Dict[int, List[str]] = defaultdict(list)
+        for path, size in files:
+            by_size[size].append(path)
+
+        duplicates: List[Tuple[str, str]] = []
+        processed = 0
+        for size, paths in by_size.items():
+            if self._scan_cancel.is_set():
+                break
+            if len(paths) < 2 or size == 0:
+                processed += len(paths)
+                self._update_status(None, progress=0.1 + 0.85 * (processed / total))
+                continue
+            digests: Dict[str, str] = {}
+            for path in paths:
+                if self._scan_cancel.is_set():
+                    break
+                digest = self._hash_file(path)
+                if digest is None:
+                    processed += 1
+                    continue
+                if digest in digests:
+                    duplicates.append((path, f"Identical to {os.path.basename(digests[digest])}"))
+                else:
+                    digests[digest] = path
+                processed += 1
+                self._update_status(None, progress=0.1 + 0.85 * (processed / total))
+        return duplicates
+
+    def _detect_by_prefix(self, files, total):
+        prefix = max(1, self.prefix_length.get() or 1)
+        buckets: Dict[Tuple[str, int], List[str]] = defaultdict(list)
+        for path, size in files:
+            name = os.path.basename(path)
+            buckets[(name[:prefix].lower(), size)].append(path)
+
+        duplicates: List[Tuple[str, str]] = []
+        processed = 0
+        for key, paths in buckets.items():
+            if self._scan_cancel.is_set():
+                break
             if len(paths) > 1:
                 paths.sort()
                 for dup in paths[1:]:
-                    if dup not in unique_dups:
-                        unique_dups.add(dup)
-                        self.duplicates.append(dup)
-                        size_kb = os.path.getsize(dup) // 1024
-                        self.results_list.insert("end", f"[PREFIX MATCH] {os.path.basename(dup)} ({size_kb} KB)\n   Path: {dup}\n\n")
+                    duplicates.append((dup, f"Shares prefix with {os.path.basename(paths[0])}"))
+            processed += len(paths)
+            self._update_status(None, progress=0.1 + 0.85 * (processed / total))
+        return duplicates
 
-    def confirm_delete(self):
-        if messagebox.askyesno("Confirm", f"Delete {len(self.duplicates)} files?"):
-            self.delete_files()
+    def _hash_file(self, path: str):
+        h = hashlib.sha1()
+        try:
+            with open(path, "rb") as file:
+                for chunk in iter(lambda: file.read(1 << 20), b""):
+                    h.update(chunk)
+        except OSError:
+            return None
+        return h.hexdigest()
 
-    def delete_files(self):
-        count = 0
-        for f in self.duplicates:
-            try:
-                os.remove(f)
-                count += 1
-            except: pass
+    # ------------------------------------------------------------------
+    def _update_status(self, message, progress=None):
+        def apply():
+            if message:
+                self.summary_label.configure(text=message)
+            if progress is not None:
+                self.progress.set(progress)
+
+        self.after(0, apply)
+
+    def _finish_scan(self):
+        self.progress.set(1.0)
+        self.progress.grid_remove()
+        self.scan_btn.configure(state="normal")
+        self.cancel_btn.configure(state="disabled")
+        cancelled = self._scan_cancel.is_set()
+        if cancelled:
+            self.status_badge.set_status("Cancelled")
+            self.summary_label.configure(text="Scan cancelled.")
+            return
+
+        self.status_badge.set_status("Completed")
+        scanned = self._stats["scanned"]
+        dups = self._stats["duplicates"]
+        size = self._stats["bytes"]
+        self.summary_label.configure(
+            text=f"Scanned {scanned:,} files — found {dups:,} duplicate{'' if dups == 1 else 's'} "
+            f"using {human_size(size)}."
+        )
         if self.app_state:
-            self.app_state.notify(f"Duplicate cleaner deleted {count} files.")
-        messagebox.showinfo("Done", f"Deleted {count} files.")
+            self.app_state.log(
+                f"Duplicate scan: {dups} duplicates totalling {human_size(size)} across {scanned} files."
+            )
+        self._render_results()
+        self.delete_btn.configure(state="normal" if dups else "disabled")
+
+    def _scan_failed(self, exc: Exception):
+        self.progress.grid_remove()
+        self.scan_btn.configure(state="normal")
+        self.cancel_btn.configure(state="disabled")
+        self.status_badge.set_status("Failed")
+        self.summary_label.configure(text=f"Scan failed: {exc}")
+        messagebox.showerror("Scan failed", str(exc))
+
+    def _render_results(self):
+        for child in self.results_scroll.winfo_children():
+            child.destroy()
+        if not self._duplicates:
+            ctk.CTkLabel(
+                self.results_scroll,
+                text="No duplicates detected.",
+                text_color=COLOR_MUTED,
+                font=ctk.CTkFont(size=FONT_BODY),
+                anchor="w",
+            ).grid(row=0, column=0, sticky="w", pady=SPACE_SM)
+            return
+
+        for idx, (path, reason) in enumerate(self._duplicates[:500]):
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+            row = ctk.CTkFrame(self.results_scroll, fg_color=COLOR_SUBTLE_BG, corner_radius=RADIUS_SM)
+            row.grid(row=idx, column=0, sticky="ew", pady=2)
+            row.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                row,
+                text=f"{GLYPH['file']}  {os.path.basename(path)}",
+                anchor="w",
+                font=ctk.CTkFont(size=FONT_BODY, weight="bold"),
+            ).grid(row=0, column=0, sticky="ew", padx=SPACE, pady=(SPACE_SM, 0))
+            ctk.CTkLabel(
+                row,
+                text=f"{reason}  ·  {human_size(size)}\n{path}",
+                text_color=COLOR_MUTED,
+                font=ctk.CTkFont(size=FONT_SMALL),
+                anchor="w",
+                justify="left",
+            ).grid(row=1, column=0, sticky="ew", padx=SPACE, pady=(0, SPACE_SM))
+        if len(self._duplicates) > 500:
+            ctk.CTkLabel(
+                self.results_scroll,
+                text=f"… and {len(self._duplicates) - 500:,} more files.",
+                text_color=COLOR_MUTED,
+                font=ctk.CTkFont(size=FONT_SMALL),
+            ).grid(row=500, column=0, sticky="w", pady=SPACE_SM)
+
+    # ------------------------------------------------------------------
+    def confirm_delete(self):
+        if not self._duplicates:
+            return
+        action = "move to Trash" if self.move_to_trash.get() else "permanently delete"
+        if not messagebox.askyesno(
+            "Confirm", f"{action.capitalize()} {len(self._duplicates)} file(s)?"
+        ):
+            return
+
+        if self.app_state:
+            self.app_state.submit_task(
+                "Duplicate removal",
+                f"{action.capitalize()} {len(self._duplicates)} files",
+                self._run_delete,
+                to_trash=self.move_to_trash.get(),
+                paths=[p for p, _ in self._duplicates],
+            )
+        else:
+            self._run_delete(to_trash=self.move_to_trash.get(), paths=[p for p, _ in self._duplicates])
+
+    def _run_delete(self, to_trash: bool, paths: List[str]):
+        deleted = 0
+        errors: List[str] = []
+        for path in paths:
+            try:
+                if to_trash:
+                    try:
+                        import send2trash as _trash
+
+                        _trash.send2trash(path)
+                    except Exception:
+                        os.remove(path)
+                else:
+                    os.remove(path)
+                deleted += 1
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{os.path.basename(path)}: {exc}")
+
+        summary = f"Removed {deleted} file(s)."
+        if errors:
+            summary += f" {len(errors)} failed."
+        if self.app_state:
+            level = "success" if not errors else "warning"
+            self.app_state.notify(summary, level=level)
+        self.after(0, lambda: self._post_delete(deleted, errors))
+        return summary
+
+    def _post_delete(self, deleted, errors):
+        messagebox.showinfo(
+            "Done",
+            f"Removed {deleted} file(s)."
+            + (f"\n\n{len(errors)} could not be removed." if errors else ""),
+        )
+        self.delete_btn.configure(state="disabled")
         self.scan_files()

@@ -632,9 +632,9 @@ class ImageStudioFrame(ctk.CTkFrame):
         if self.original_image is None:
             return
         if axis == "h":
-            self.original_image = self.original_image.transpose(Image.FLIP_LEFT_RIGHT)
+            self.original_image = self.original_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         else:
-            self.original_image = self.original_image.transpose(Image.FLIP_TOP_BOTTOM)
+            self.original_image = self.original_image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
         self.on_adjustment_change()
 
     def reset_edits(self):

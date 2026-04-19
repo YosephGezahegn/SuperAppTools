@@ -1,0 +1,23 @@
+# Core UI
+customtkinter>=5.2.2
+Pillow>=10.0.0
+
+# Image & video processing (optional — quality scaler / image studio)
+opencv-python>=4.8.0
+moviepy>=1.0.3
+numpy>=1.24.0
+
+# Screen capture (optional — screen recorder)
+mss>=9.0.1
+
+# Audio recording (optional — screen recorder with audio)
+pyaudio>=0.2.14
+
+# Safe file deletion (optional — duplicate cleaner "Move to Trash")
+send2trash>=1.8.3
+
+# OCR (optional — future plugins)
+# pytesseract>=0.3.10
+
+# EXIF metadata (optional — future plugins)
+# piexif>=1.1.3

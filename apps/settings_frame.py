@@ -1,124 +1,262 @@
+"""Settings frame with accent picker, folder config, and preferences."""
+
+from __future__ import annotations
+
 import os
+
 import customtkinter as ctk
-from tkinter import filedialog
+from tkinter import messagebox
+
 from core.app_state import _default_settings
+from core.theme import (
+    ACCENT_PALETTES,
+    COLOR_CARD_BG,
+    COLOR_CARD_BORDER,
+    COLOR_MUTED,
+    COLOR_SUBTLE_BG,
+    FONT_BODY,
+    FONT_H3,
+    FONT_SMALL,
+    GLYPH,
+    RADIUS,
+    RADIUS_LG,
+    RADIUS_SM,
+    SPACE,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+)
+from core.ui_helpers import (
+    Card,
+    FolderPicker,
+    GhostButton,
+    PageHeader,
+    PrimaryButton,
+)
+
+
+FOLDER_FIELDS = [
+    ("default_output_folder", "Default output", "Where exports go by default."),
+    ("recordings_folder", "Recordings", "Used by the Screen Recorder."),
+    ("exports_folder", "Media exports", "Used by Quality + Compressor and Image Studio."),
+    ("organized_folder", "Organized files", "Destination for File Organizer runs."),
+    ("snapshots_folder", "Snapshots", "Backup Snapshot stores archives here."),
+]
 
 
 class SettingsFrame(ctk.CTkFrame):
     def __init__(self, master, app_state=None, **kwargs):
+        kwargs.setdefault("fg_color", "transparent")
         super().__init__(master, **kwargs)
         self.app_state = app_state
 
-        self.grid_columnconfigure(0, weight=1)
-
         self.theme_var = ctk.StringVar(value=self._setting("theme", "Dark"))
-        self.output_var = ctk.StringVar(value=self._setting("default_output_folder", ""))
-        self.recordings_var = ctk.StringVar(value=self._setting("recordings_folder", ""))
-        self.exports_var = ctk.StringVar(value=self._setting("exports_folder", ""))
-        self.organized_var = ctk.StringVar(value=self._setting("organized_folder", ""))
-        self.snapshots_var = ctk.StringVar(value=self._setting("snapshots_folder", ""))
+        self.accent_var = ctk.StringVar(value=self._setting("accent", "Blue"))
         self.image_format_var = ctk.StringVar(value=self._setting("preferred_image_format", "png"))
         self.video_format_var = ctk.StringVar(value=self._setting("preferred_video_format", "mp4"))
         self.max_workers_var = ctk.StringVar(value=str(self._setting("max_workers", 2)))
+        self.confirm_var = ctk.BooleanVar(value=self._setting("confirm_destructive", True))
+        self.toast_var = ctk.BooleanVar(value=self._setting("enable_toasts", True))
 
-        self.create_widgets()
+        self.folder_vars = {
+            key: ctk.StringVar(value=self._setting(key, ""))
+            for key, _label, _helper in FOLDER_FIELDS
+        }
+
+        self.grid_columnconfigure(0, weight=1)
+        self._build_ui()
 
     def _setting(self, key, fallback):
         if not self.app_state:
             return fallback
         return self.app_state.settings.get(key, fallback)
 
-    def create_widgets(self):
-        ctk.CTkLabel(self, text="Global Settings", font=ctk.CTkFont(size=24, weight="bold")).grid(
-            row=0, column=0, padx=20, pady=(20, 10), sticky="n"
-        )
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        PageHeader(
+            self,
+            title="Settings",
+            subtitle="Appearance, preferred formats, working folders, and safety options.",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, SPACE_MD))
 
-        form = ctk.CTkFrame(self)
-        form.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
-        form.grid_columnconfigure(1, weight=1)
+        # Appearance
+        appearance_card = Card(self, title="Appearance", padding=SPACE_MD)
+        appearance_card.grid(row=1, column=0, sticky="ew", pady=(0, SPACE_MD))
+        body = appearance_card.body
+        body.grid_columnconfigure(0, weight=1)
 
-        self._folder_row(form, 0, "Default Output", self.output_var)
-        self._folder_row(form, 1, "Recordings Folder", self.recordings_var)
-        self._folder_row(form, 2, "Exports Folder", self.exports_var)
-        self._folder_row(form, 3, "Organized Folder", self.organized_var)
-        self._folder_row(form, 4, "Snapshots Folder", self.snapshots_var)
+        mode_row = ctk.CTkFrame(body, fg_color="transparent")
+        mode_row.grid(row=0, column=0, sticky="ew")
+        mode_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            mode_row, text="Theme", font=ctk.CTkFont(size=FONT_BODY, weight="bold"), width=120, anchor="w"
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkSegmentedButton(
+            mode_row,
+            values=["Dark", "Light", "System"],
+            variable=self.theme_var,
+            command=self._on_theme_change,
+        ).grid(row=0, column=1, sticky="ew")
 
-        ctk.CTkLabel(form, text="Theme").grid(row=5, column=0, padx=10, pady=10, sticky="w")
-        self.theme_menu = ctk.CTkOptionMenu(form, values=["Dark", "Light", "System"], variable=self.theme_var)
-        self.theme_menu.grid(row=5, column=1, padx=10, pady=10, sticky="ew")
+        ctk.CTkLabel(
+            body, text="Accent color", font=ctk.CTkFont(size=FONT_BODY, weight="bold"), anchor="w"
+        ).grid(row=1, column=0, sticky="w", pady=(SPACE_MD, SPACE_SM))
 
-        ctk.CTkLabel(form, text="Preferred Image Format").grid(row=6, column=0, padx=10, pady=10, sticky="w")
-        self.image_menu = ctk.CTkOptionMenu(
-            form, values=["png", "jpg", "webp", "bmp", "tiff"], variable=self.image_format_var
-        )
-        self.image_menu.grid(row=6, column=1, padx=10, pady=10, sticky="ew")
+        swatch_row = ctk.CTkFrame(body, fg_color="transparent")
+        swatch_row.grid(row=2, column=0, sticky="ew")
+        self._swatch_widgets = {}
+        for idx, name in enumerate(ACCENT_PALETTES.keys()):
+            self._swatch_widgets[name] = self._make_swatch(swatch_row, name)
+            self._swatch_widgets[name].grid(row=0, column=idx, padx=(0, SPACE_SM))
+        self._refresh_swatches()
 
-        ctk.CTkLabel(form, text="Preferred Video Format").grid(row=7, column=0, padx=10, pady=10, sticky="w")
-        self.video_menu = ctk.CTkOptionMenu(form, values=["mp4", "mov", "webm"], variable=self.video_format_var)
-        self.video_menu.grid(row=7, column=1, padx=10, pady=10, sticky="ew")
+        # Preferences
+        prefs_card = Card(self, title="Preferences", padding=SPACE_MD)
+        prefs_card.grid(row=2, column=0, sticky="ew", pady=(0, SPACE_MD))
+        body = prefs_card.body
+        body.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(form, text="Task Workers").grid(row=8, column=0, padx=10, pady=10, sticky="w")
-        ctk.CTkEntry(form, textvariable=self.max_workers_var).grid(row=8, column=1, padx=10, pady=10, sticky="ew")
+        self._option_row(body, 0, "Preferred image format", self.image_format_var, ["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
+        self._option_row(body, 1, "Preferred video format", self.video_format_var, ["mp4", "mov", "webm", "avi"])
+        self._entry_row(body, 2, "Task workers (parallel jobs)", self.max_workers_var)
 
+        ctk.CTkCheckBox(
+            body,
+            text="Confirm before destructive actions (delete, overwrite)",
+            variable=self.confirm_var,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(SPACE_SM, 0))
+        ctk.CTkCheckBox(
+            body, text="Show toast notifications", variable=self.toast_var
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(SPACE_SM, 0))
+
+        # Folders
+        folders_card = Card(self, title="Working folders", padding=SPACE_MD)
+        folders_card.grid(row=3, column=0, sticky="ew", pady=(0, SPACE_MD))
+        body = folders_card.body
+        body.grid_columnconfigure(0, weight=1)
+
+        for row_idx, (key, label, helper) in enumerate(FOLDER_FIELDS):
+            FolderPicker(body, label, self.folder_vars[key], helper=helper).grid(
+                row=row_idx, column=0, sticky="ew", pady=SPACE_SM
+            )
+
+        # Footer
         footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.grid(row=2, column=0, padx=20, pady=10, sticky="ew")
+        footer.grid(row=4, column=0, sticky="ew", pady=(0, SPACE_MD))
+        footer.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkButton(footer, text="Reset Defaults", fg_color="gray", command=self.reset_defaults).pack(
-            side="left", padx=5, pady=5
+        GhostButton(footer, text=f"{GLYPH['refresh']}  Reset to defaults", command=self.reset_defaults).grid(
+            row=0, column=0, sticky="w"
         )
-        ctk.CTkButton(footer, text="Save Settings", fg_color="green", command=self.save_settings).pack(
-            side="right", padx=5, pady=5
-        )
-
-    def _folder_row(self, parent, row, label, variable):
-        ctk.CTkLabel(parent, text=label).grid(row=row, column=0, padx=10, pady=10, sticky="w")
-        ctk.CTkEntry(parent, textvariable=variable).grid(row=row, column=1, padx=10, pady=10, sticky="ew")
-        ctk.CTkButton(parent, text="Browse", width=90, command=lambda v=variable: self.pick_folder(v)).grid(
-            row=row, column=2, padx=10, pady=10
+        PrimaryButton(footer, text=f"{GLYPH['check']}  Save settings", command=self.save_settings, width=160).grid(
+            row=0, column=1, sticky="e"
         )
 
-    def pick_folder(self, variable):
-        path = filedialog.askdirectory()
-        if path:
-            variable.set(path)
+    # ------------------------------------------------------------------
+    def _option_row(self, parent, row, label, variable, values):
+        ctk.CTkLabel(parent, text=label, width=160, anchor="w").grid(row=row, column=0, sticky="w", pady=SPACE_SM)
+        ctk.CTkOptionMenu(parent, values=values, variable=variable).grid(row=row, column=1, sticky="ew", pady=SPACE_SM)
 
-    def reset_defaults(self):
-        if not self.app_state:
-            return
-        defaults = _default_settings()
-        self.output_var.set(defaults.get("default_output_folder", ""))
-        self.recordings_var.set(defaults.get("recordings_folder", ""))
-        self.exports_var.set(defaults.get("exports_folder", ""))
-        self.organized_var.set(defaults.get("organized_folder", ""))
-        self.snapshots_var.set(defaults.get("snapshots_folder", ""))
-        self.theme_var.set(defaults.get("theme", "Dark"))
-        self.image_format_var.set(defaults.get("preferred_image_format", "png"))
-        self.video_format_var.set(defaults.get("preferred_video_format", "mp4"))
-        self.max_workers_var.set(str(defaults.get("max_workers", 2)))
+    def _entry_row(self, parent, row, label, variable):
+        ctk.CTkLabel(parent, text=label, width=160, anchor="w").grid(row=row, column=0, sticky="w", pady=SPACE_SM)
+        ctk.CTkEntry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=SPACE_SM)
 
+    def _make_swatch(self, parent, name: str):
+        palette = ACCENT_PALETTES[name]
+        container = ctk.CTkFrame(parent, fg_color="transparent")
+        dot = ctk.CTkButton(
+            container,
+            text="",
+            width=42,
+            height=42,
+            corner_radius=21,
+            fg_color=palette["primary"],
+            hover_color=palette["primary_hover"],
+            command=lambda n=name: self._pick_accent(n),
+        )
+        dot.grid(row=0, column=0)
+        label = ctk.CTkLabel(
+            container,
+            text=name,
+            font=ctk.CTkFont(size=FONT_SMALL),
+            text_color=COLOR_MUTED,
+        )
+        label.grid(row=1, column=0, pady=(SPACE_SM, 0))
+        container._dot = dot  # noqa: SLF001
+        container._label = label  # noqa: SLF001
+        return container
+
+    def _refresh_swatches(self):
+        active = self.accent_var.get()
+        for name, widget in self._swatch_widgets.items():
+            if name == active:
+                widget._label.configure(text_color=("#111827", "#E5E7EB"), font=ctk.CTkFont(size=FONT_SMALL, weight="bold"))
+                widget._dot.configure(border_width=3, border_color=("#111827", "#E5E7EB"))
+            else:
+                widget._label.configure(text_color=COLOR_MUTED, font=ctk.CTkFont(size=FONT_SMALL))
+                widget._dot.configure(border_width=0)
+
+    def _pick_accent(self, name: str):
+        self.accent_var.set(name)
+        self._refresh_swatches()
+        top = self.winfo_toplevel()
+        if hasattr(top, "apply_accent"):
+            top.apply_accent(name)
+
+    def _on_theme_change(self, value: str):
+        ctk.set_appearance_mode(value)
+        if self.app_state:
+            self.app_state.settings["theme"] = value
+            self.app_state.save_settings()
+
+    # ------------------------------------------------------------------
     def save_settings(self):
         if not self.app_state:
             return
+        try:
+            workers = max(1, int(self.max_workers_var.get() or "1"))
+        except ValueError:
+            messagebox.showerror("Invalid", "Worker count must be a whole number.")
+            return
+
         updates = {
             "theme": self.theme_var.get(),
-            "default_output_folder": self.output_var.get().strip(),
-            "recordings_folder": self.recordings_var.get().strip(),
-            "exports_folder": self.exports_var.get().strip(),
-            "organized_folder": self.organized_var.get().strip(),
-            "snapshots_folder": self.snapshots_var.get().strip(),
+            "accent": self.accent_var.get(),
             "preferred_image_format": self.image_format_var.get().strip(),
             "preferred_video_format": self.video_format_var.get().strip(),
-            "max_workers": max(1, int(self.max_workers_var.get() or "1")),
+            "max_workers": workers,
+            "confirm_destructive": bool(self.confirm_var.get()),
+            "enable_toasts": bool(self.toast_var.get()),
         }
-        for path_key in [
-            "default_output_folder",
-            "recordings_folder",
-            "exports_folder",
-            "organized_folder",
-            "snapshots_folder",
-        ]:
-            path = updates[path_key]
-            if path:
-                os.makedirs(path, exist_ok=True)
+        for key, _label, _helper in FOLDER_FIELDS:
+            value = self.folder_vars[key].get().strip()
+            updates[key] = value
+            if value:
+                try:
+                    os.makedirs(value, exist_ok=True)
+                except OSError:
+                    pass
         self.app_state.update_settings(updates)
         ctk.set_appearance_mode(updates["theme"])
+        top = self.winfo_toplevel()
+        if hasattr(top, "apply_accent"):
+            top.apply_accent(updates["accent"])
+
+    def reset_defaults(self):
+        defaults = _default_settings()
+        for key in ("theme", "accent", "preferred_image_format", "preferred_video_format", "max_workers"):
+            value = defaults.get(key, "")
+            var = getattr(self, f"{key.split('_')[0]}_var", None)
+            if var is None:
+                continue
+        # Apply individual vars
+        self.theme_var.set(defaults.get("theme", "Dark"))
+        self.accent_var.set(defaults.get("accent", "Blue"))
+        self.image_format_var.set(defaults.get("preferred_image_format", "png"))
+        self.video_format_var.set(defaults.get("preferred_video_format", "mp4"))
+        self.max_workers_var.set(str(defaults.get("max_workers", 2)))
+        self.confirm_var.set(defaults.get("confirm_destructive", True))
+        self.toast_var.set(defaults.get("enable_toasts", True))
+        for key, _label, _helper in FOLDER_FIELDS:
+            self.folder_vars[key].set(defaults.get(key, ""))
+        self._refresh_swatches()
