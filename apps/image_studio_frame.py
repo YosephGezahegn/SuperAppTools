@@ -1,5 +1,6 @@
 import os
 import re
+import threading
 import urllib.request
 from datetime import datetime
 from urllib.parse import urlparse
@@ -40,6 +41,7 @@ class ImageStudioFrame(ctk.CTkFrame):
         self.all_paths = []
         self.filtered_paths = []
         self.selected_path = None
+        self._thumb_generation = 0
 
         self.original_image = None
         self.preview_image = None
@@ -283,13 +285,17 @@ class ImageStudioFrame(ctk.CTkFrame):
         self.list_buttons = []
         self.list_thumbs = []
 
+        self._thumb_generation += 1
+        current_gen = self._thumb_generation
+        pending_labels: list = []
+
         for index, path in enumerate(self.filtered_paths):
-            thumb_label = ctk.CTkLabel(self.list_frame, text="", width=80)
+            thumb_label = ctk.CTkLabel(self.list_frame, text="·", width=80, height=80, text_color="#555555")
             thumb_label.grid(row=index, column=0, padx=(4, 8), pady=4)
-            self._set_thumbnail(thumb_label, path)
             self._bind_list_navigation(thumb_label)
             self._bind_wheel_recursive(thumb_label)
             thumb_label.bind("<Button-1>", lambda _e, p=path: self.select_path_and_focus(p))
+            pending_labels.append((path, thumb_label))
 
             button = ctk.CTkButton(
                 self.list_frame,
@@ -303,17 +309,36 @@ class ImageStudioFrame(ctk.CTkFrame):
             self._bind_list_navigation(button)
             self._bind_wheel_recursive(button)
 
-    def _set_thumbnail(self, label, path):
-        try:
-            with Image.open(path) as image:
-                thumb = ImageOps.exif_transpose(image).convert("RGBA")
-                thumb.thumbnail(THUMBNAIL_SIZE, Image.LANCZOS)
-                ctk_thumb = ctk.CTkImage(light_image=thumb, dark_image=thumb, size=thumb.size)
-            label.configure(image=ctk_thumb, text="")
-            label.image = ctk_thumb
-            self.list_thumbs.append(ctk_thumb)
-        except Exception:
-            label.configure(text="No preview")
+        threading.Thread(
+            target=self._load_thumbs_thread,
+            args=(current_gen, pending_labels),
+            daemon=True,
+        ).start()
+
+    def _load_thumbs_thread(self, gen: int, items: list):
+        for path, label in items:
+            if self._thumb_generation != gen:
+                return
+            try:
+                with Image.open(path) as img:
+                    thumb = ImageOps.exif_transpose(img).convert("RGBA")
+                    thumb.thumbnail(THUMBNAIL_SIZE, Image.LANCZOS)
+                    ctk_thumb = ctk.CTkImage(light_image=thumb, dark_image=thumb, size=thumb.size)
+            except Exception:
+                ctk_thumb = None
+
+            if self._thumb_generation != gen:
+                return
+
+            def _apply(lbl=label, image=ctk_thumb):
+                if image:
+                    lbl.configure(image=image, text="")
+                    lbl.image = image
+                    self.list_thumbs.append(image)
+                else:
+                    lbl.configure(text="?")
+
+            self.after(0, _apply)
 
     def select_path(self, path):
         if not path or not os.path.exists(path):
