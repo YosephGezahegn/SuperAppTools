@@ -70,7 +70,7 @@ class SuperApp(ctk.CTk):
         ctk.set_appearance_mode(self.app_state.settings.get("theme", "Dark"))
         ctk.set_default_color_theme("blue")
 
-        self.title("SuperApp — Creator Toolkit")
+        self.title("SuperApp 1.1 — Creator Toolkit")
         self.geometry(f"{WINDOW_DEFAULT[0]}x{WINDOW_DEFAULT[1]}")
         self.minsize(*WINDOW_MIN)
 

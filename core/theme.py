@@ -7,6 +7,8 @@ a consistent look and accent changes propagate with one setting.
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
+VERSION = "1.1"
+
 
 # Spacing scale (4pt grid)
 SPACE_XS = 4
