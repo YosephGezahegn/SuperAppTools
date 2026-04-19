@@ -127,6 +127,8 @@ GLYPH = {
     "file": "▭",
     "clock": "◷",
     "star": "★",
+    "download": "⬇",
+    "camera": "📸",
 }
 
 

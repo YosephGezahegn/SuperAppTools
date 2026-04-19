@@ -129,8 +129,7 @@ class ImageStudioFrame(ctk.CTkFrame):
         self.contrast = ctk.DoubleVar(value=1.0)
         self.saturation = ctk.DoubleVar(value=1.0)
         self.blur = ctk.DoubleVar(value=0.0)
-        self.flip_h_pct = ctk.DoubleVar(value=0.0)
-        self.flip_v_pct = ctk.DoubleVar(value=0.0)
+        self.transform_pct = ctk.DoubleVar(value=0.0)
 
         # Crop / lasso state
         self.crop_mode = False
@@ -217,7 +216,7 @@ class ImageStudioFrame(ctk.CTkFrame):
 
         self.list_frame = ctk.CTkScrollableFrame(sidebar, fg_color="transparent", corner_radius=0)
         self.list_frame.grid(row=3, column=0, sticky="nsew", padx=2, pady=(0, SPACE_SM))
-        self.list_frame.grid_columnconfigure(1, weight=1)
+        self.list_frame.grid_columnconfigure(0, weight=1)
         self.list_buttons: list = []
         self.list_thumbs: list = []
         self._bind_list_navigation(self.list_frame)
@@ -248,7 +247,6 @@ class ImageStudioFrame(ctk.CTkFrame):
         controls_outer.grid(row=1, column=2, sticky="nsew",
                             padx=(SPACE_SM, SPACE_MD), pady=(0, SPACE_MD))
         controls_outer.grid_columnconfigure(0, weight=1)
-        controls_outer.grid_propagate(False)
 
         row = 0
 
@@ -282,22 +280,16 @@ class ImageStudioFrame(ctk.CTkFrame):
                       height=28, font=ctk.CTkFont(size=FONT_SMALL)).grid(
             row=0, column=1, sticky="ew", padx=(2, 0))
 
-        _slider_row(b, "Flip H %", self.flip_h_pct, 0.0, 100.0,
+        _slider_row(b, "Transform %", self.transform_pct, 0.0, 100.0,
                     self.on_adjustment_change, 1, ".0f")
-        _slider_row(b, "Flip V %", self.flip_v_pct, 0.0, 100.0,
-                    self.on_adjustment_change, 2, ".0f")
 
-        reset_flip_row = ctk.CTkFrame(b, fg_color="transparent")
-        reset_flip_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(SPACE_SM, 0))
-        reset_flip_row.grid_columnconfigure((0, 1), weight=1)
-        ctk.CTkButton(reset_flip_row, text="Reset Flip H",
-                      command=lambda: (self.flip_h_pct.set(0), self.on_adjustment_change()),
+        reset_transform_row = ctk.CTkFrame(b, fg_color="transparent")
+        reset_transform_row.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(SPACE_SM, 0))
+        reset_transform_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkButton(reset_transform_row, text="Reset Transform",
+                      command=lambda: (self.transform_pct.set(0), self.on_adjustment_change()),
                       height=26, font=ctk.CTkFont(size=FONT_SMALL),
-                      fg_color="#3a3a3a").grid(row=0, column=0, sticky="ew", padx=(0, 2))
-        ctk.CTkButton(reset_flip_row, text="Reset Flip V",
-                      command=lambda: (self.flip_v_pct.set(0), self.on_adjustment_change()),
-                      height=26, font=ctk.CTkFont(size=FONT_SMALL),
-                      fg_color="#3a3a3a").grid(row=0, column=1, sticky="ew", padx=(2, 0))
+                      fg_color="#3a3a3a").grid(row=0, column=0, sticky="ew")
 
         # ── Freehand / Crop ──────────────────────────────────────────
         crop_sec = _Section(controls_outer, "Freehand Crop")
@@ -447,28 +439,34 @@ class ImageStudioFrame(ctk.CTkFrame):
         pending: list = []
 
         for index, path in enumerate(self.filtered_paths):
-            thumb_label = ctk.CTkLabel(self.list_frame, text="·", width=THUMBNAIL_SIZE[0],
+            # Container for thumbnail + filename
+            item_frame = ctk.CTkFrame(self.list_frame, fg_color="transparent")
+            item_frame.grid(row=index, column=0, sticky="ew", padx=2, pady=SPACE_SM)
+            item_frame.grid_columnconfigure(0, weight=1)
+
+            thumb_label = ctk.CTkLabel(item_frame, text="·", width=THUMBNAIL_SIZE[0],
                                        height=THUMBNAIL_SIZE[1], text_color="#444")
-            thumb_label.grid(row=index, column=0, padx=(4, 6), pady=3)
+            thumb_label.grid(row=0, column=0, pady=(0, 2))
             self._bind_list_navigation(thumb_label)
             self._bind_wheel_recursive(thumb_label)
             thumb_label.bind("<Button-1>", lambda _e, p=path: self.select_path_and_focus(p))
             pending.append((path, thumb_label))
 
             button = ctk.CTkButton(
-                self.list_frame,
+                item_frame,
                 text=os.path.basename(path),
-                anchor="w",
-                height=THUMBNAIL_SIZE[1],
+                anchor="center",
+                height=22,
                 fg_color=COLOR_SUBTLE_BG if path == self.selected_path else "transparent",
                 hover_color=COLOR_SUBTLE_BG,
                 font=ctk.CTkFont(size=FONT_SMALL),
                 command=lambda p=path: self.select_path_and_focus(p),
             )
-            button.grid(row=index, column=1, padx=(0, 4), pady=3, sticky="ew")
+            button.grid(row=1, column=0, sticky="ew", padx=2)
             self.list_buttons.append((path, button))
             self._bind_list_navigation(button)
             self._bind_wheel_recursive(button)
+            self._bind_wheel_recursive(item_frame)
 
         threading.Thread(
             target=self._load_thumbs_thread,
@@ -642,8 +640,7 @@ class ImageStudioFrame(ctk.CTkFrame):
         self.contrast.set(1.0)
         self.saturation.set(1.0)
         self.blur.set(0.0)
-        self.flip_h_pct.set(0.0)
-        self.flip_v_pct.set(0.0)
+        self.transform_pct.set(0.0)
 
     def on_adjustment_change(self, _value=None):
         if self.original_image is None:
@@ -655,17 +652,11 @@ class ImageStudioFrame(ctk.CTkFrame):
         if self.blur.get() > 0:
             img = img.filter(ImageFilter.GaussianBlur(radius=self.blur.get()))
 
-        # Flip H percentage: blend original ↔ horizontally flipped
-        h_pct = self.flip_h_pct.get() / 100.0
-        if h_pct > 0:
-            flipped_h = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-            img = Image.blend(img, flipped_h, h_pct)
-
-        # Flip V percentage: blend original ↔ vertically flipped
-        v_pct = self.flip_v_pct.get() / 100.0
-        if v_pct > 0:
-            flipped_v = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
-            img = Image.blend(img, flipped_v, v_pct)
+        # Transform %: Rotate image (circle)
+        rot_pct = self.transform_pct.get()
+        if rot_pct > 0:
+            # Map 0-100% to 0-360 degrees
+            img = img.rotate(- (rot_pct * 3.6), expand=True)
 
         self.preview_image = img
         self.render_preview()
